@@ -4,3 +4,4 @@ fastapi
 uvicorn
 langchain
 langchain-groq
+dotenv
