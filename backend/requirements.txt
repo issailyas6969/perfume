@@ -1,0 +1,6 @@
+langchain
+langgraph
+fastapi 
+uvicorn
+langchain
+langchain-groq
