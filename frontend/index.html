@@ -779,6 +779,146 @@ footer { background: var(--black); color: var(--light-sage); padding: 4rem 3rem 
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
+<!-- 1️⃣ SHOPIFY INTEGRATION (ADD THIS FIRST) -->
+<script>
+// SHOPIFY CONFIGURATION
+const SHOPIFY_DOMAIN   = 'ardc1r-g0.myshopify.com';
+const SHOPIFY_TOKEN    = 'cd2e0e0c8fee8e604abf4ab7427e304b';
+const SHOPIFY_API_URL  = `https://${SHOPIFY_DOMAIN}/api/2024-01/graphql.json`;
+
+let products = [];
+
+// FETCH SHOPIFY PRODUCTS
+async function fetchShopifyProducts() {
+  try {
+    const query = `
+      {
+        products(first: 100) {
+          edges {
+            node {
+              id
+              title
+              description
+              vendor
+              productType
+              variants(first: 5) {
+                edges {
+                  node {
+                    id
+                    title
+                    price { amount }
+                    image { url }
+                    quantityAvailable
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await fetch(SHOPIFY_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Storefront-Access-Token': SHOPIFY_TOKEN
+      },
+      body: JSON.stringify({ query })
+    });
+
+    const data = await response.json();
+    
+    if (data.errors) {
+      console.error('Shopify error:', data.errors);
+      return [];
+    }
+
+    products = data.data.products.edges.map((edge, idx) => {
+      const product = edge.node;
+      const variant = product.variants.edges[0]?.node;
+      
+      return {
+        id: product.id.split('/').pop(),
+        shopifyId: product.id,
+        variantId: variant?.id,
+        name: product.title,
+        brand: product.vendor || 'Luxury Brand',
+        category: product.productType?.toLowerCase() || 'designer',
+        desc: product.description?.substring(0, 80) || '',
+        price: Math.round(parseFloat(variant?.price?.amount || 0) * 80),
+        size: variant?.title || '100ml',
+        image: variant?.image?.url,
+        color1: '#E8E4D8',
+        color2: '#132616',
+        shape: 'bottle-' + (idx % 3),
+        stock: (variant?.quantityAvailable || 0) > 0,
+        inventory: variant?.quantityAvailable || 0
+      };
+    });
+
+    console.log('✓ Loaded', products.length, 'products from Shopify');
+    renderProductGrid(products);
+    return products;
+
+  } catch (error) {
+    console.error('Shopify fetch error:', error);
+    return [];
+  }
+}
+
+// CREATE SHOPIFY CHECKOUT
+async function createShopifyCheckout(cartItems) {
+  try {
+    const lineItems = cartItems.map(item => ({
+      variantId: item.variantId,
+      quantity: item.qty
+    }));
+
+    const query = `
+      mutation {
+        checkoutCreate(input: {
+          lineItems: [
+            ${lineItems.map(li => `{variantId: "${li.variantId}", quantity: ${li.quantity}}`).join(',')}
+          ]
+        }) {
+          checkout {
+            id
+            webUrl
+          }
+          checkoutUserErrors {
+            message
+          }
+        }
+      }
+    `;
+
+    const response = await fetch(SHOPIFY_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Storefront-Access-Token': SHOPIFY_TOKEN
+      },
+      body: JSON.stringify({ query })
+    });
+
+    const data = await response.json();
+
+    if (data.data.checkoutCreate.checkoutUserErrors.length > 0) {
+      throw new Error(data.data.checkoutCreate.checkoutUserErrors[0].message);
+    }
+
+    return data.data.checkoutCreate.checkout;
+
+  } catch (error) {
+    console.error('Checkout error:', error);
+    throw error;
+  }
+}
+
+// LOAD PRODUCTS ON PAGE LOAD
+window.addEventListener('DOMContentLoaded', fetchShopifyProducts);
+</script>
 <!-- FIREBASE -->
 <script type="module">
 // js/firebase.js  — Firebase Auth + Firestore
@@ -983,25 +1123,84 @@ window.removeFromCart = function(id) {
 // ── CHECKOUT ──
 window.checkout = async function(selectedAddressId) {
   if (!window._currentUser || !window._cart.length) { showToast('Your cart is empty.'); return; }
+  
   const addr = window._addresses.find(a => a.id === selectedAddressId) || null;
+  
   try {
-    await addDoc(collection(db, 'orders'), {
+    // Step 1: Save order to Firebase
+    const orderRef = await addDoc(collection(db, 'orders'), {
       uid: window._currentUser.uid,
       phone: window._currentUser.phoneNumber,
       items: window._cart,
       total: window._cart.reduce((s,i) => s + i.price * i.qty, 0),
       deliveryAddress: addr,
       status: 'pending',
+      source: 'shopify',
       createdAt: serverTimestamp()
     });
+
+    // Step 2: Prepare Shopify cart items
+    const shopifyLineItems = window._cart.map(item => ({
+      variantId: item.variantId, // Must have variantId from Shopify
+      quantity: item.qty
+    }));
+
+    // Step 3: Create Shopify checkout
+    const checkoutQuery = `
+      mutation {
+        checkoutCreate(input: {
+          lineItems: [
+            ${shopifyLineItems.map(li => `{variantId: "${li.variantId}", quantity: ${li.quantity}}`).join(',')}
+          ]
+        }) {
+          checkout {
+            id
+            webUrl
+          }
+          checkoutUserErrors {
+            message
+            field
+          }
+        }
+      }
+    `;
+
+    const shopifyResponse = await fetch('https://ardc1r-g0.myshopify.com/api/2024-01/graphql.json', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Storefront-Access-Token': 'cd2e0e0c8fee8e604abf4ab7427e304b'
+      },
+      body: JSON.stringify({ query: checkoutQuery })
+    });
+
+    const shopifyData = await shopifyResponse.json();
+
+    if (shopifyData.data.checkoutCreate.checkoutUserErrors.length > 0) {
+      throw new Error(shopifyData.data.checkoutCreate.checkoutUserErrors[0].message);
+    }
+
+    const checkoutUrl = shopifyData.data.checkoutCreate.checkout.webUrl;
+
+    // Step 4: Clear cart locally
     window._cart = [];
     await window.saveCartToDB();
     if (typeof updateCartBadge === 'function') updateCartBadge();
     if (typeof renderCartItems === 'function') renderCartItems();
     if (typeof closeCart === 'function') closeCart();
     if (typeof closeCheckoutModal === 'function') closeCheckoutModal();
-    showToast('Order placed successfully! 🎉');
-  } catch(e) { showToast('Error placing order. Try again.'); }
+
+    // Step 5: Show success and redirect
+    showToast('Order placed! Redirecting to Shopify... 🎉');
+    
+    setTimeout(() => {
+      window.location.href = checkoutUrl;
+    }, 1500);
+
+  } catch(e) {
+    showToast('Error: ' + e.message);
+    console.error('Checkout error:', e);
+  }
 };
 
 // ── SIGN OUT ──
